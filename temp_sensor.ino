@@ -51,7 +51,7 @@ unsigned long delayTime = 20*1000;
 void setup()
 {
     Serial.begin(9600);
-    Serial.println(F("BME280 test"));
+    Serial.println(F("\nBME280 sensor node"));
 
     sensor_init();
     wifi_init();
@@ -65,6 +65,14 @@ void setup()
 
 void loop()
 {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println(F("Reconnecting."));
+        do {
+            delay(200);
+        } while (WiFi.status() != WL_CONNECTED);
+        Serial.println(F("Reconnected."));
+    }
+
     if (!acked) {
         discover();
     }
@@ -73,7 +81,9 @@ void loop()
     //Serial.print(packet);
     Serial.println();
 
-    delay(delayTime);
+    //delay(delayTime);
+    ESP.deepSleep(delayTime*1000, WAKE_NO_RFCAL);
+    Serial.println(F("Woke up."));
 }
 
 void send_and_await()
