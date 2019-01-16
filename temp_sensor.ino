@@ -6,7 +6,6 @@
 #include <Adafruit_BME280.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-#include <CRC32.h>
 
 #include <pb.h>
 #include <pb_common.h>
@@ -32,7 +31,6 @@ uint32_t         wake_n = 0;
 
 const char* ssid       = "aje-csw";
 const char* passphrase = "celeryairshipomitted";
-uint32_t    creds_crc  = 0;
 char        host_string[16];
 const int   LOCAL_PORT = 4000;
 
@@ -56,7 +54,6 @@ const static int LOC_WAKE_N = 66;
 const static int LOC_SVC_ADDR = 67;
 const static int LOC_SVC_PORT = 68;
 const static int LOC_ACKED = 69;
-const static int LOC_CREDS_CRC = 70;
 
 const static int CALIBRATE_EVERY = 100;
 
@@ -140,7 +137,6 @@ void load_rtc()
     system_rtc_mem_read(LOC_SVC_ADDR, &svc_addr, sizeof(svc_addr));
     system_rtc_mem_read(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
     system_rtc_mem_read(LOC_ACKED, &acked, sizeof(acked));
-    system_rtc_mem_read(LOC_CREDS_CRC, &creds_crc, sizeof(creds_crc));
 }
 
 bool is_cold_start()
@@ -150,20 +146,8 @@ bool is_cold_start()
 
 void wifi_init()
 {
-    auto expected = expected_creds_crc();
-    if (creds_crc == expected) {
-        // use saved credentials
-        Serial.println(F("Using saved credentials."));
-        WiFi.begin();
-    } else {
-        // credentials checksum doesn't match
-        // set credentials; writes to flash?
-        Serial.println(F("Setting credentials."));
-        WiFi.begin(ssid, passphrase);
-        creds_crc = expected;
-        // record CRC to skip this
-        system_rtc_mem_write(LOC_CREDS_CRC, &creds_crc, sizeof(creds_crc));
-    }
+    WiFi.persistent(false);
+    WiFi.begin(ssid, passphrase);
 
     Serial.print(F("Connecting to wifi"));
     int tries = 0;
@@ -320,19 +304,4 @@ void dump_report()
     Serial.print("Humidity = ");
     Serial.print(report.payload.bme280.humidity);
     Serial.println(" %");
-}
-
-uint32_t expected_creds_crc()
-{
-    CRC32 crc;
-    crc32_update_str(crc, ssid);
-    crc32_update_str(crc, passphrase);
-    return crc.finalize();
-}
-
-uint32_t crc32_update_str(CRC32& crc, const char* str)
-{
-    while (auto c = *str++) {
-        crc.update(c);
-    }
 }
