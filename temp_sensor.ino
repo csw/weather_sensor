@@ -57,6 +57,15 @@ const static int LOC_ACKED = 69;
 
 const static int CALIBRATE_EVERY = 100;
 
+class WifiSleepTypeCtx
+{
+public:
+    WifiSleepTypeCtx(sleep_type_t st);
+    ~WifiSleepTypeCtx();
+private:
+    sleep_type_t _saved;
+};
+
 void setup()
 {
     Serial.begin(9600);
@@ -148,6 +157,7 @@ void wifi_init()
 {
     WiFi.persistent(false);
     WiFi.begin(ssid, passphrase);
+    auto sc = WifiSleepTypeCtx(LIGHT_SLEEP_T);
 
     Serial.print(F("Connecting to wifi"));
     int tries = 0;
@@ -173,6 +183,8 @@ void wifi_init()
 
 void discover()
 {
+    WifiSleepTypeCtx sc(LIGHT_SLEEP_T);
+
     if (!MDNS.begin(host_string)) {
         Serial.println("Error setting up MDNS responder!");
     }
@@ -304,4 +316,15 @@ void dump_report()
     Serial.print("Humidity = ");
     Serial.print(report.payload.bme280.humidity);
     Serial.println(" %");
+}
+
+WifiSleepTypeCtx::WifiSleepTypeCtx(sleep_type_t st)
+    : _saved(wifi_get_sleep_type())
+{
+    wifi_set_sleep_type(st);
+}
+
+WifiSleepTypeCtx::~WifiSleepTypeCtx()
+{
+    wifi_set_sleep_type(_saved);
 }
