@@ -6,7 +6,7 @@
 #include <Adafruit_BME280.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-
+#include <CRC32.h>
 
 #include <pb.h>
 #include <pb_common.h>
@@ -27,10 +27,14 @@
 Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
 WiFiUDP         udp;
 
+struct rst_info* rsti;
+uint32_t         wake_n = 0;
+
 const char* ssid       = "aje-csw";
 const char* passphrase = "celeryairshipomitted";
+uint32_t    creds_crc  = 0;
 char        host_string[16];
-const int   local_port = 4000;
+const int   LOCAL_PORT = 4000;
 
 const char* service = "weather";
 IPAddress   svc_addr;
@@ -48,29 +52,67 @@ char log_msg[256];
 
 unsigned long delayTime = 20*1000;
 
+const static int LOC_WAKE_N = 66;
+const static int LOC_SVC_ADDR = 67;
+const static int LOC_SVC_PORT = 68;
+const static int LOC_ACKED = 69;
+const static int LOC_CREDS_CRC = 70;
+
+const static int CALIBRATE_EVERY = 100;
+
 void setup()
 {
     Serial.begin(9600);
     Serial.println(F("\nBME280 sensor node"));
 
+    rsti = system_get_rst_info();
+
+    Serial.print(F("init wake_n: "));
+    Serial.println(wake_n);
+    load_rtc();
+    Serial.print(F("loaded wake_n: "));
+    Serial.println(wake_n);
+
+    Serial.print(F("Reset reason: "));
+    Serial.println(rsti->reason);
+
+    if (is_cold_start()) {
+        // boot; could be 0 (cold boot) or 6 (reset)
+        wake_n = 0;
+    } else {
+        // wake from deep sleep
+        ++wake_n;
+    }
+    system_rtc_mem_write(LOC_WAKE_N, &wake_n, sizeof(wake_n));
+    Serial.print(F("Wakeup number: "));
+    Serial.println(wake_n);
+
     sensor_init();
     wifi_init();
-    udp.begin(local_port);
+    yield();
+    udp.begin(LOCAL_PORT);
 
     report.which_payload = Report_bme280_tag;
 
     Serial.println(F("Sensor node ready.\n"));
 }
 
-
 void loop()
 {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println(F("Reconnecting."));
+        int tries = 0;
         do {
             delay(200);
-        } while (WiFi.status() != WL_CONNECTED);
-        Serial.println(F("Reconnected."));
+        } while (WiFi.status() != WL_CONNECTED
+                 && tries++ < 20);
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println(F("Reconnected."));
+        } else {
+            Serial.println(F("Failed to connect to wifi."));
+            // sleep for a minute, do RF calibration in case that's what's needed
+            ESP.deepSleep(60e6, WAKE_RFCAL);
+        }
     }
 
     if (!acked) {
@@ -83,7 +125,6 @@ void loop()
 
     //delay(delayTime);
     ESP.deepSleep(delayTime*1000, WAKE_NO_RFCAL);
-    Serial.println(F("Woke up."));
 }
 
 void send_and_await()
@@ -93,17 +134,49 @@ void send_and_await()
     wait_ack();
 }
 
+void load_rtc()
+{
+    system_rtc_mem_read(LOC_WAKE_N, &wake_n, sizeof(wake_n));
+    system_rtc_mem_read(LOC_SVC_ADDR, &svc_addr, sizeof(svc_addr));
+    system_rtc_mem_read(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
+    system_rtc_mem_read(LOC_ACKED, &acked, sizeof(acked));
+    system_rtc_mem_read(LOC_CREDS_CRC, &creds_crc, sizeof(creds_crc));
+}
+
+bool is_cold_start()
+{
+    return rsti->reason != 5;
+}
+
 void wifi_init()
 {
-    WiFi.begin(ssid, passphrase);
+    auto expected = expected_creds_crc();
+    if (creds_crc == expected) {
+        // use saved credentials
+        Serial.println(F("Using saved credentials."));
+        WiFi.begin();
+    } else {
+        // credentials checksum doesn't match
+        // set credentials; writes to flash?
+        Serial.println(F("Setting credentials."));
+        WiFi.begin(ssid, passphrase);
+        creds_crc = expected;
+        // record CRC to skip this
+        system_rtc_mem_write(LOC_CREDS_CRC, &creds_crc, sizeof(creds_crc));
+    }
 
-    Serial.print(F("Connecting to WiFi"));
-    while (WiFi.status() != WL_CONNECTED)
-    {
+    Serial.print(F("Connecting to wifi"));
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries++ < 20) {
         delay(500);
         Serial.print(".");
     }
     Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println(F("Failed to connect, sleeping."));
+        ESP.deepSleep(delayTime*1000, WAKE_NO_RFCAL);
+    }
 
     Serial.print(F("Connected, IP address: "));
     Serial.println(WiFi.localIP());
@@ -112,36 +185,48 @@ void wifi_init()
     Serial.print("Hostname: ");
     Serial.println(host_string);
 
-    if (!MDNS.begin(host_string)) {
-        Serial.println("Error setting up MDNS responder!");
-    }
-    Serial.println("mDNS responder started");
 }
 
 void discover()
 {
+    if (!MDNS.begin(host_string)) {
+        Serial.println("Error setting up MDNS responder!");
+    }
+    Serial.println("mDNS responder started");
+
     Serial.print(F("Looking for mDNS UDP service: "));
     Serial.println(service);
 
     int n = 0;
-    while (n == 0) {
+    int tries = 0;
+    while (n == 0 && tries++ < 10) {
         n = MDNS.queryService(service, "udp"); // Send out query for esp tcp services
         Serial.println(F("mDNS query done"));
         if (n != 0) {
             break;
         }
         Serial.println(F("no services found"));
-        delay(5000);
+        delay(2000);
         // blink or something
+    }
+
+    if (n == 0) {
+        // discovery failed, sleep and try again
+        Serial.println(F("Service discovery failed, sleeping."));
+        ESP.deepSleep(delayTime*1000, WAKE_NO_RFCAL);
     }
 
     svc_addr = MDNS.IP(0);
     svc_port = MDNS.port(0);
 
+    system_rtc_mem_write(LOC_SVC_ADDR, &svc_addr, sizeof(svc_addr));
+    system_rtc_mem_write(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
+
     Serial.print(F("service address: "));
     Serial.print(svc_addr);
     Serial.print(":");
     Serial.println(svc_port);
+    Serial.flush();
 }
 
 void sensor_init()
@@ -209,7 +294,10 @@ void wait_ack()
     }
     if (acked) {
         Serial.println(F("Acknowledged."));
+    } else {
+        Serial.println(F("Timed out waiting for ack."));
     }
+    system_rtc_mem_write(LOC_ACKED, &acked, sizeof(acked));
 }
 
 void dump_report()
@@ -232,4 +320,19 @@ void dump_report()
     Serial.print("Humidity = ");
     Serial.print(report.payload.bme280.humidity);
     Serial.println(" %");
+}
+
+uint32_t expected_creds_crc()
+{
+    CRC32 crc;
+    crc32_update_str(crc, ssid);
+    crc32_update_str(crc, passphrase);
+    return crc.finalize();
+}
+
+uint32_t crc32_update_str(CRC32& crc, const char* str)
+{
+    while (auto c = *str++) {
+        crc.update(c);
+    }
 }
