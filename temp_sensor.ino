@@ -21,24 +21,54 @@
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
+template <typename T>
+class RTCVar
+{
+public:
+    // Read value from the RTC on initialization
+    RTCVar(int loc)
+        : _loc(loc)
+    {
+        load();
+    }
+
+    inline operator T() { return _val; }
+
+    // Set the value and write it to the RTC
+    inline RTCVar& operator =(const T& val) { _val = val; store(); };
+
+private:
+    void load();
+    void store();
+
+    int _loc;
+    T   _val {};
+};
+
+const static int LOC_WAKE_N = 66;
+const static int LOC_SVC_ADDR = 67;
+const static int LOC_SVC_PORT = 68;
+const static int LOC_ACKED = 69;
+
 //Adafruit_BME280 bme; // I2C
 //Adafruit_BME280 bme(BME_CS); // hardware SPI
 Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
 WiFiUDP         udp;
 
 struct rst_info* rsti;
-uint32_t         wake_n = 0;
+RTCVar<uint32_t> wake_n { LOC_WAKE_N };
 
 const char* ssid       = "aje-csw";
 const char* passphrase = "celeryairshipomitted";
 char        host_string[16];
 const int   LOCAL_PORT = 4000;
 
-const char* service = "weather";
-IPAddress   svc_addr;
-uint16_t    svc_port;
+const char*      SERVICE = "weather";
+RTCVar<uint32_t> svc_addr_raw { LOC_SVC_ADDR };
+RTCVar<uint16_t> svc_port     { LOC_SVC_PORT };
+IPAddress        svc_addr;
 
-bool        acked = false;
+RTCVar<bool> acked { LOC_ACKED };
 
 Report   report;
 Response response;
@@ -49,11 +79,6 @@ unsigned char rcvbuf[256];
 char log_msg[256];
 
 unsigned long delayTime = 20*1000;
-
-const static int LOC_WAKE_N = 66;
-const static int LOC_SVC_ADDR = 67;
-const static int LOC_SVC_PORT = 68;
-const static int LOC_ACKED = 69;
 
 const static int CALIBRATE_EVERY = 100;
 
@@ -71,13 +96,11 @@ void setup()
     Serial.begin(9600);
     Serial.println(F("\nBME280 sensor node"));
 
-    rsti = system_get_rst_info();
+    // the raw value gets read from the RTC, need to convert it into
+    // an Arduino IPAddress
+    svc_addr = svc_addr_raw;
 
-    Serial.print(F("init wake_n: "));
-    Serial.println(wake_n);
-    load_rtc();
-    Serial.print(F("loaded wake_n: "));
-    Serial.println(wake_n);
+    rsti = system_get_rst_info();
 
     Serial.print(F("Reset reason: "));
     Serial.println(rsti->reason);
@@ -87,9 +110,8 @@ void setup()
         wake_n = 0;
     } else {
         // wake from deep sleep
-        ++wake_n;
+        wake_n = wake_n+1;
     }
-    system_rtc_mem_write(LOC_WAKE_N, &wake_n, sizeof(wake_n));
     Serial.print(F("Wakeup number: "));
     Serial.println(wake_n);
 
@@ -140,16 +162,6 @@ void send_and_await()
     wait_ack();
 }
 
-void load_rtc()
-{
-    system_rtc_mem_read(LOC_WAKE_N, &wake_n, sizeof(wake_n));
-    uint32_t svc_addr_i;
-    system_rtc_mem_read(LOC_SVC_ADDR, &svc_addr_i, sizeof(svc_addr_i));
-    svc_addr = IPAddress(svc_addr_i);
-    system_rtc_mem_read(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
-    system_rtc_mem_read(LOC_ACKED, &acked, sizeof(acked));
-}
-
 bool is_cold_start()
 {
     return rsti->reason != 5;
@@ -180,7 +192,6 @@ void wifi_init()
     sprintf(host_string, "ESP_%06X", ESP.getChipId());
     Serial.print("Hostname: ");
     Serial.println(host_string);
-
 }
 
 void discover()
@@ -193,12 +204,12 @@ void discover()
     Serial.println("mDNS responder started");
 
     Serial.print(F("Looking for mDNS UDP service: "));
-    Serial.println(service);
+    Serial.println(SERVICE);
 
     int n = 0;
     int tries = 0;
     while (n == 0 && tries++ < 10) {
-        n = MDNS.queryService(service, "udp"); // Send out query for esp tcp services
+        n = MDNS.queryService(SERVICE, "udp"); // Send out query for esp tcp services
         Serial.println(F("mDNS query done"));
         if (n != 0) {
             break;
@@ -215,11 +226,8 @@ void discover()
     }
 
     svc_addr = MDNS.IP(0);
-    uint32_t svc_addr_i = svc_addr;
+    svc_addr_raw = svc_addr;
     svc_port = MDNS.port(0);
-
-    system_rtc_mem_write(LOC_SVC_ADDR, &svc_addr_i, sizeof(svc_addr_i));
-    system_rtc_mem_write(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
 
     Serial.print(F("service address: "));
     Serial.print(svc_addr);
@@ -296,7 +304,6 @@ void wait_ack()
     } else {
         Serial.println(F("Timed out waiting for ack."));
     }
-    system_rtc_mem_write(LOC_ACKED, &acked, sizeof(acked));
 }
 
 void dump_report()
@@ -330,4 +337,16 @@ WifiSleepTypeCtx::WifiSleepTypeCtx(sleep_type_t st)
 WifiSleepTypeCtx::~WifiSleepTypeCtx()
 {
     wifi_set_sleep_type(_saved);
+}
+
+template <typename T>
+void RTCVar<T>::load()
+{
+    system_rtc_mem_read(_loc, &_val, sizeof(_val));
+}
+
+template <typename T>
+void RTCVar<T>::store()
+{
+    system_rtc_mem_write(_loc, &_val, sizeof(_val));
 }
