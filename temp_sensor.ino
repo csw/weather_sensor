@@ -121,7 +121,7 @@ void loop()
         }
     }
 
-    if (!acked) {
+    if (is_cold_start() || !acked) {
         discover();
     }
     read_sensor();
@@ -143,7 +143,9 @@ void send_and_await()
 void load_rtc()
 {
     system_rtc_mem_read(LOC_WAKE_N, &wake_n, sizeof(wake_n));
-    system_rtc_mem_read(LOC_SVC_ADDR, &svc_addr, sizeof(svc_addr));
+    uint32_t svc_addr_i;
+    system_rtc_mem_read(LOC_SVC_ADDR, &svc_addr_i, sizeof(svc_addr_i));
+    svc_addr = IPAddress(svc_addr_i);
     system_rtc_mem_read(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
     system_rtc_mem_read(LOC_ACKED, &acked, sizeof(acked));
 }
@@ -157,7 +159,7 @@ void wifi_init()
 {
     WiFi.persistent(false);
     WiFi.begin(ssid, passphrase);
-    auto sc = WifiSleepTypeCtx(LIGHT_SLEEP_T);
+    //auto sc = WifiSleepTypeCtx(LIGHT_SLEEP_T);
 
     Serial.print(F("Connecting to wifi"));
     int tries = 0;
@@ -169,7 +171,7 @@ void wifi_init()
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println(F("Failed to connect, sleeping."));
-        ESP.deepSleep(delayTime*1000, WAKE_NO_RFCAL);
+        ESP.deepSleep(delayTime*1000, WAKE_RFCAL);
     }
 
     Serial.print(F("Connected, IP address: "));
@@ -213,9 +215,10 @@ void discover()
     }
 
     svc_addr = MDNS.IP(0);
+    uint32_t svc_addr_i = svc_addr;
     svc_port = MDNS.port(0);
 
-    system_rtc_mem_write(LOC_SVC_ADDR, &svc_addr, sizeof(svc_addr));
+    system_rtc_mem_write(LOC_SVC_ADDR, &svc_addr_i, sizeof(svc_addr_i));
     system_rtc_mem_write(LOC_SVC_PORT, &svc_port, sizeof(svc_port));
 
     Serial.print(F("service address: "));
